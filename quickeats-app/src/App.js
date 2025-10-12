@@ -1,10 +1,21 @@
-import React, { useState } from 'react';
-import { ShoppingCart, User, MapPin, Clock, Star, Plus, Minus, Truck, CheckCircle, Play, Square, Send, Check, X } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { ShoppingCart, User, Clock, Plus, Minus, Play, Send, Check, X } from 'lucide-react';
 import { POSConfiguration, POSMenuSync, POSOrderManager } from './components/pos';
 import CustomerPageEditor from './components/CustomerPageEditor';
 import CustomPageView from './components/CustomPageView';
 import posManager from './services/pos/POSManager';
-import { POS_PROVIDERS } from './types/pos';
+import {
+  sanitizeHtml,
+  isValidEmail,
+  isValidPhone,
+  validatePassword,
+  maskCardNumber,
+  isValidCardNumber,
+  sanitizeInput,
+  isValidZip,
+  loginRateLimiter,
+  hasRole
+} from './utils/security';
 
 const DeliveryApp = () => {
     const [currentView, setCurrentView] = useState('landing');
@@ -17,7 +28,6 @@ const DeliveryApp = () => {
     const [isRestaurantOwner, setIsRestaurantOwner] = useState(false);
     const [restaurantOwnerId, setRestaurantOwnerId] = useState(null);
     const [draggedOrder, setDraggedOrder] = useState(null);
-    const [selectedDriver, setSelectedDriver] = useState(null);
     const [editingRestaurant, setEditingRestaurant] = useState(null);
     const [editingMenuItem, setEditingMenuItem] = useState(null);
     const [editingMenuItemId, setEditingMenuItemId] = useState(null);
@@ -26,9 +36,6 @@ const DeliveryApp = () => {
     const [showLoginModal, setShowLoginModal] = useState(false);
     const [showProfileModal, setShowProfileModal] = useState(false);
     const [selectedItemForOptions, setSelectedItemForOptions] = useState(null);
-    const [selectedRestaurantForModal, setSelectedRestaurantForModal] = useState(null);
-    const [showPOSConfig, setShowPOSConfig] = useState(false);
-    const [showPOSMenuSync, setShowPOSMenuSync] = useState(false);
 
     const [restaurants, setRestaurants] = useState([
         { id: 1, name: "Mario's Italian", cuisine: "Italian", rating: 4.8, deliveryTime: "25-35 min", deliveryFee: 2.99, image: "🍝", commissionRate: 0.15, deliveryRadius: 10, minOrderAmount: 10, isActive: true, address: "123 Pasta Lane, Athens, GA", phone: "(555) 123-4567", menu: [
@@ -251,19 +258,6 @@ const DeliveryApp = () => {
         setDrivers(drivers.map(d => d.id === driverId ? { ...d, status: 'busy', assignedOrders: [...d.assignedOrders, orderId] } : d));
     };
 
-    const startDelivery = (orderId) => {
-        setOrders(orders.map(o => o.id === orderId ? { ...o, status: 'in_transit', isActive: true } : o));
-    };
-
-    const stopDelivery = (orderId) => {
-        const order = orders.find(o => o.id === orderId);
-        if (!order) return;
-        setOrders(orders.map(o => o.id === orderId ? { ...o, assignedDriver: null, status: 'preparing', isActive: false } : o));
-        if (order.assignedDriver) {
-            setDrivers(drivers.map(d => d.id === order.assignedDriver ? { ...d, status: d.assignedOrders.length === 1 ? 'available' : 'busy', assignedOrders: d.assignedOrders.filter(id => id !== orderId) } : d));
-        }
-    };
-
     const unassignOrder = (orderId) => {
         const order = orders.find(o => o.id === orderId);
         if (!order || !order.assignedDriver) return;
@@ -317,34 +311,96 @@ const DeliveryApp = () => {
         const [formData, setFormData] = useState({
             name: '', email: '', phone: '', address: '', city: '', state: '', zipcode: '', cardNumber: ''
         });
+        const [validationErrors, setValidationErrors] = useState({});
 
         const handleQuickLogin = () => {
-            const isAdminLogin = email === 'admin@rdsware.com';
-            const restaurantOwner = restaurants.find(r => email === `owner@${r.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`);
+            const errors = {};
+
+            // Rate limiting check for login attempts
+            if (!loginRateLimiter.isAllowed(email || formData.email)) {
+                errors.general = 'Too many login attempts. Please try again in 5 minutes.';
+                setValidationErrors(errors);
+                return;
+            }
 
             if (isSignUp) {
+                // Validate all signup fields
+                if (!formData.name.trim()) {
+                    errors.name = 'Name is required';
+                }
+                if (!isValidEmail(formData.email)) {
+                    errors.email = 'Please enter a valid email address';
+                }
+                if (!isValidPhone(formData.phone)) {
+                    errors.phone = 'Please enter a valid US phone number';
+                }
+                if (!formData.address.trim()) {
+                    errors.address = 'Address is required';
+                }
+                if (!formData.city.trim()) {
+                    errors.city = 'City is required';
+                }
+                if (!formData.state.trim() || formData.state.length !== 2) {
+                    errors.state = 'Enter 2-letter state code';
+                }
+                if (!isValidZip(formData.zipcode)) {
+                    errors.zipcode = 'Please enter a valid ZIP code';
+                }
+                if (!isValidCardNumber(formData.cardNumber)) {
+                    errors.cardNumber = 'Please enter a valid card number';
+                }
+                const passwordValidation = validatePassword(password);
+                if (!passwordValidation.valid) {
+                    errors.password = passwordValidation.message;
+                }
+
+                if (Object.keys(errors).length > 0) {
+                    setValidationErrors(errors);
+                    return;
+                }
+
                 setUser({
                     id: Date.now(),
-                    name: formData.name,
+                    name: sanitizeInput(formData.name),
                     email: formData.email,
                     phone: formData.phone,
-                    addresses: [{ id: 1, label: 'Home', address: `${formData.address}, ${formData.city}, ${formData.state} ${formData.zipcode}`, isDefault: true }],
+                    addresses: [{ id: 1, label: 'Home', address: `${sanitizeInput(formData.address)}, ${sanitizeInput(formData.city)}, ${formData.state} ${formData.zipcode}`, isDefault: true }],
                     paymentMethods: [{ id: 1, type: 'card', last4: formData.cardNumber.slice(-4), brand: 'visa', isDefault: true }]
                 });
             } else {
+                // Validate login fields
+                if (!isValidEmail(email)) {
+                    errors.email = 'Please enter a valid email address';
+                }
+                if (!password) {
+                    errors.password = 'Password is required';
+                }
+
+                if (Object.keys(errors).length > 0) {
+                    setValidationErrors(errors);
+                    return;
+                }
+
+                const isAdminLogin = email === 'admin@rdsware.com';
+                const restaurantOwner = restaurants.find(r => email === `owner@${r.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`);
+
                 setUser({
                     id: 1,
                     name: isAdminLogin ? 'Admin' : restaurantOwner ? restaurantOwner.name + ' Owner' : 'John Doe',
-                    email: email || 'user@example.com',
+                    email: email,
                     phone: '555-1234',
                     addresses: [{ id: 1, label: 'Home', address: '123 Main St, Athens, GA 30601', isDefault: true }],
-                    paymentMethods: [{ id: 1, type: 'card', last4: '4242', brand: 'visa', isDefault: true }]
+                    paymentMethods: [{ id: 1, type: 'card', last4: '4242', brand: 'visa', isDefault: true }],
+                    isAdmin: isAdminLogin,
+                    isRestaurantOwner: !!restaurantOwner
                 });
+                setIsAdmin(isAdminLogin);
+                setIsRestaurantOwner(!!restaurantOwner);
+                setRestaurantOwnerId(restaurantOwner?.id || null);
+                setCurrentView(isAdminLogin ? 'admin' : restaurantOwner ? 'restaurant-backend' : 'landing');
             }
-            setIsAdmin(isAdminLogin);
-            setIsRestaurantOwner(!!restaurantOwner);
-            setRestaurantOwnerId(restaurantOwner?.id || null);
-            setCurrentView(isAdminLogin ? 'admin' : restaurantOwner ? 'restaurant-backend' : 'landing');
+
+            setValidationErrors({});
             setShowLoginModal(false);
         };
 
@@ -353,78 +409,111 @@ const DeliveryApp = () => {
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => setShowLoginModal(false)}>
                     <div className="bg-white rounded-lg p-8 max-w-md w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
                         <h2 className="text-2xl font-bold mb-4">Create Account</h2>
-                        <div className="space-y-3">
-                            <input
-                                type="text"
-                                placeholder="Name"
-                                value={formData.name}
-                                onChange={(e) => setFormData({...formData, name: e.target.value})}
-                                className="w-full p-3 border rounded"
-                            />
-                            <input
-                                type="email"
-                                placeholder="Email"
-                                value={formData.email}
-                                onChange={(e) => setFormData({...formData, email: e.target.value})}
-                                className="w-full p-3 border rounded"
-                            />
-                            <input
-                                type="tel"
-                                placeholder="Phone"
-                                value={formData.phone}
-                                onChange={(e) => setFormData({...formData, phone: e.target.value})}
-                                className="w-full p-3 border rounded"
-                            />
-                            <input
-                                type="text"
-                                placeholder="Address"
-                                value={formData.address}
-                                onChange={(e) => setFormData({...formData, address: e.target.value})}
-                                className="w-full p-3 border rounded"
-                            />
-                            <div className="grid grid-cols-3 gap-3">
-                                <input
-                                    type="text"
-                                    placeholder="City"
-                                    value={formData.city}
-                                    onChange={(e) => setFormData({...formData, city: e.target.value})}
-                                    className="p-3 border rounded"
-                                />
-                                <input
-                                    type="text"
-                                    placeholder="State"
-                                    value={formData.state}
-                                    onChange={(e) => setFormData({...formData, state: e.target.value})}
-                                    className="p-3 border rounded"
-                                />
-                                <input
-                                    type="text"
-                                    placeholder="ZIP"
-                                    value={formData.zipcode}
-                                    onChange={(e) => setFormData({...formData, zipcode: e.target.value})}
-                                    className="p-3 border rounded"
-                                />
+                        {validationErrors.general && (
+                            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-800 text-sm">
+                                {validationErrors.general}
                             </div>
-                            <input
-                                type="text"
-                                placeholder="Card Number"
-                                value={formData.cardNumber}
-                                onChange={(e) => setFormData({...formData, cardNumber: e.target.value})}
-                                className="w-full p-3 border rounded"
-                            />
-                            <input
-                                type="password"
-                                placeholder="Password"
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                className="w-full p-3 border rounded"
-                            />
+                        )}
+                        <div className="space-y-3">
+                            <div>
+                                <input
+                                    type="text"
+                                    placeholder="Name"
+                                    value={formData.name}
+                                    onChange={(e) => setFormData({...formData, name: e.target.value})}
+                                    className={`w-full p-3 border rounded ${validationErrors.name ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.name && <p className="text-red-500 text-xs mt-1">{validationErrors.name}</p>}
+                            </div>
+                            <div>
+                                <input
+                                    type="email"
+                                    placeholder="Email"
+                                    value={formData.email}
+                                    onChange={(e) => setFormData({...formData, email: e.target.value})}
+                                    className={`w-full p-3 border rounded ${validationErrors.email ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.email && <p className="text-red-500 text-xs mt-1">{validationErrors.email}</p>}
+                            </div>
+                            <div>
+                                <input
+                                    type="tel"
+                                    placeholder="Phone"
+                                    value={formData.phone}
+                                    onChange={(e) => setFormData({...formData, phone: e.target.value})}
+                                    className={`w-full p-3 border rounded ${validationErrors.phone ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.phone && <p className="text-red-500 text-xs mt-1">{validationErrors.phone}</p>}
+                            </div>
+                            <div>
+                                <input
+                                    type="text"
+                                    placeholder="Address"
+                                    value={formData.address}
+                                    onChange={(e) => setFormData({...formData, address: e.target.value})}
+                                    className={`w-full p-3 border rounded ${validationErrors.address ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.address && <p className="text-red-500 text-xs mt-1">{validationErrors.address}</p>}
+                            </div>
+                            <div className="grid grid-cols-3 gap-3">
+                                <div>
+                                    <input
+                                        type="text"
+                                        placeholder="City"
+                                        value={formData.city}
+                                        onChange={(e) => setFormData({...formData, city: e.target.value})}
+                                        className={`p-3 border rounded w-full ${validationErrors.city ? 'border-red-500' : ''}`}
+                                    />
+                                    {validationErrors.city && <p className="text-red-500 text-xs mt-1">{validationErrors.city}</p>}
+                                </div>
+                                <div>
+                                    <input
+                                        type="text"
+                                        placeholder="State"
+                                        value={formData.state}
+                                        onChange={(e) => setFormData({...formData, state: e.target.value.toUpperCase()})}
+                                        maxLength={2}
+                                        className={`p-3 border rounded w-full ${validationErrors.state ? 'border-red-500' : ''}`}
+                                    />
+                                    {validationErrors.state && <p className="text-red-500 text-xs mt-1">{validationErrors.state}</p>}
+                                </div>
+                                <div>
+                                    <input
+                                        type="text"
+                                        placeholder="ZIP"
+                                        value={formData.zipcode}
+                                        onChange={(e) => setFormData({...formData, zipcode: e.target.value})}
+                                        className={`p-3 border rounded w-full ${validationErrors.zipcode ? 'border-red-500' : ''}`}
+                                    />
+                                    {validationErrors.zipcode && <p className="text-red-500 text-xs mt-1">{validationErrors.zipcode}</p>}
+                                </div>
+                            </div>
+                            <div>
+                                <input
+                                    type="text"
+                                    placeholder="Card Number"
+                                    value={formData.cardNumber}
+                                    onChange={(e) => setFormData({...formData, cardNumber: e.target.value})}
+                                    className={`w-full p-3 border rounded ${validationErrors.cardNumber ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.cardNumber && <p className="text-red-500 text-xs mt-1">{validationErrors.cardNumber}</p>}
+                            </div>
+                            <div>
+                                <input
+                                    type="password"
+                                    placeholder="Password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    className={`w-full p-3 border rounded ${validationErrors.password ? 'border-red-500' : ''}`}
+                                />
+                                {validationErrors.password && <p className="text-red-500 text-xs mt-1">{validationErrors.password}</p>}
+                            </div>
                         </div>
                         <button onClick={handleQuickLogin} className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 mt-4 mb-3">
                             Create Account
                         </button>
                         <p className="text-center text-sm">
-                            Have an account? <button onClick={() => setIsSignUp(false)} className="text-blue-500 hover:underline">Sign In</button>
+                            Have an account? <button onClick={() => { setIsSignUp(false); setValidationErrors({}); }} className="text-blue-500 hover:underline">Sign In</button>
                         </p>
                     </div>
                 </div>
@@ -436,25 +525,36 @@ const DeliveryApp = () => {
                 <div className="bg-white rounded-lg p-8 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
                     <h2 className="text-2xl font-bold mb-4">Sign in to continue</h2>
                     <p className="text-gray-600 mb-4">Please sign in to place your order</p>
-                    <input
-                        type="email"
-                        placeholder="Email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        className="w-full p-3 border rounded mb-3"
-                    />
-                    <input
-                        type="password"
-                        placeholder="Password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        className="w-full p-3 border rounded mb-4"
-                    />
+                    {validationErrors.general && (
+                        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-800 text-sm">
+                            {validationErrors.general}
+                        </div>
+                    )}
+                    <div className="mb-3">
+                        <input
+                            type="email"
+                            placeholder="Email"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className={`w-full p-3 border rounded ${validationErrors.email ? 'border-red-500' : ''}`}
+                        />
+                        {validationErrors.email && <p className="text-red-500 text-xs mt-1">{validationErrors.email}</p>}
+                    </div>
+                    <div className="mb-4">
+                        <input
+                            type="password"
+                            placeholder="Password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className={`w-full p-3 border rounded ${validationErrors.password ? 'border-red-500' : ''}`}
+                        />
+                        {validationErrors.password && <p className="text-red-500 text-xs mt-1">{validationErrors.password}</p>}
+                    </div>
                     <button onClick={handleQuickLogin} className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 mb-3">
                         Sign In
                     </button>
                     <p className="text-center text-sm">
-                        No account? <button onClick={() => setIsSignUp(true)} className="text-blue-500 hover:underline">Create Account</button>
+                        No account? <button onClick={() => { setIsSignUp(true); setValidationErrors({}); }} className="text-blue-500 hover:underline">Create Account</button>
                     </p>
                 </div>
             </div>
@@ -467,9 +567,39 @@ const DeliveryApp = () => {
             email: user?.email || '',
             phone: user?.phone || ''
         });
+        const [validationErrors, setValidationErrors] = useState({});
 
         const handleSave = () => {
-            setUser({ ...user, ...formData });
+            const errors = {};
+
+            // Validate profile fields
+            if (!formData.name.trim()) {
+                errors.name = 'Name is required';
+            } else if (formData.name.length > 100) {
+                errors.name = 'Name is too long (max 100 characters)';
+            }
+
+            if (!isValidEmail(formData.email)) {
+                errors.email = 'Please enter a valid email address';
+            }
+
+            if (!isValidPhone(formData.phone)) {
+                errors.phone = 'Please enter a valid US phone number';
+            }
+
+            if (Object.keys(errors).length > 0) {
+                setValidationErrors(errors);
+                return;
+            }
+
+            // Sanitize and save
+            setUser({
+                ...user,
+                name: sanitizeInput(formData.name),
+                email: formData.email,
+                phone: formData.phone
+            });
+            setValidationErrors({});
             setShowProfileModal(false);
         };
 
@@ -484,8 +614,9 @@ const DeliveryApp = () => {
                                 type="text"
                                 value={formData.name}
                                 onChange={(e) => setFormData({...formData, name: e.target.value})}
-                                className="w-full p-3 border rounded"
+                                className={`w-full p-3 border rounded ${validationErrors.name ? 'border-red-500' : ''}`}
                             />
+                            {validationErrors.name && <p className="text-red-500 text-xs mt-1">{validationErrors.name}</p>}
                         </div>
                         <div>
                             <label className="block text-sm font-semibold mb-1">Email</label>
@@ -493,8 +624,9 @@ const DeliveryApp = () => {
                                 type="email"
                                 value={formData.email}
                                 onChange={(e) => setFormData({...formData, email: e.target.value})}
-                                className="w-full p-3 border rounded"
+                                className={`w-full p-3 border rounded ${validationErrors.email ? 'border-red-500' : ''}`}
                             />
+                            {validationErrors.email && <p className="text-red-500 text-xs mt-1">{validationErrors.email}</p>}
                         </div>
                         <div>
                             <label className="block text-sm font-semibold mb-1">Phone</label>
@@ -502,8 +634,9 @@ const DeliveryApp = () => {
                                 type="tel"
                                 value={formData.phone}
                                 onChange={(e) => setFormData({...formData, phone: e.target.value})}
-                                className="w-full p-3 border rounded"
+                                className={`w-full p-3 border rounded ${validationErrors.phone ? 'border-red-500' : ''}`}
                             />
+                            {validationErrors.phone && <p className="text-red-500 text-xs mt-1">{validationErrors.phone}</p>}
                         </div>
                     </div>
                     <div className="flex gap-2 mt-6">
@@ -662,83 +795,14 @@ const DeliveryApp = () => {
         );
     };
 
-    function LoginScreen() {
-        const [email, setEmail] = useState('');
-        const [password, setPassword] = useState('');
-        const [isSignUp, setIsSignUp] = useState(false);
-        const [formData, setFormData] = useState({
-            name: '', email: '', phone: '', address: '', city: '', state: '', zipcode: '', cardNumber: '', cardName: '', expiryDate: '', cvv: ''
-        });
-
-        const handleLogin = () => {
-            const isAdminLogin = email === 'admin@rdsware.com';
-            const restaurantOwner = restaurants.find(r => email === `owner@${r.name.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`);
-
-            if (isSignUp) {
-                setUser({
-                    id: Date.now(), name: formData.name, email: formData.email, phone: formData.phone,
-                    addresses: [{ id: 1, label: 'Home', address: `${formData.address}, ${formData.city}, ${formData.state} ${formData.zipcode}`, isDefault: true }],
-                    paymentMethods: [{ id: 1, type: 'card', last4: formData.cardNumber.slice(-4), brand: 'visa', isDefault: true }]
-                });
-            } else {
-                setUser({ id: 1, name: isAdminLogin ? 'Admin' : restaurantOwner ? restaurantOwner.name + ' Owner' : 'John Doe', email, phone: '555-1234', addresses: [{ id: 1, label: 'Home', address: '123 Main St', isDefault: true }], paymentMethods: [{ id: 1, type: 'card', last4: '4242', brand: 'visa', isDefault: true }] });
-            }
-            setIsAdmin(isAdminLogin);
-            setIsRestaurantOwner(!!restaurantOwner);
-            setRestaurantOwnerId(restaurantOwner?.id || null);
-            setCurrentView(isAdminLogin ? 'admin' : restaurantOwner ? 'restaurant-backend' : 'landing');
-        };
-
-        if (isSignUp) {
-            return (
-                <div className="min-h-screen bg-gray-50 py-12 px-4">
-                    <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-lg p-8">
-                        <h2 className="text-3xl font-bold mb-6 text-center">Sign Up</h2>
-                        <div className="space-y-4">
-                            <input type="text" placeholder="Name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} className="w-full p-3 border rounded" />
-                            <input type="email" placeholder="Email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} className="w-full p-3 border rounded" />
-                            <input type="tel" placeholder="Phone" value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} className="w-full p-3 border rounded" />
-                            <input type="text" placeholder="Address" value={formData.address} onChange={(e) => setFormData({...formData, address: e.target.value})} className="w-full p-3 border rounded" />
-                            <div className="grid grid-cols-3 gap-4">
-                                <input type="text" placeholder="City" value={formData.city} onChange={(e) => setFormData({...formData, city: e.target.value})} className="p-3 border rounded" />
-                                <input type="text" placeholder="State" value={formData.state} onChange={(e) => setFormData({...formData, state: e.target.value})} className="p-3 border rounded" />
-                                <input type="text" placeholder="ZIP" value={formData.zipcode} onChange={(e) => setFormData({...formData, zipcode: e.target.value})} className="p-3 border rounded" />
-                            </div>
-                            <input type="text" placeholder="Card Number" value={formData.cardNumber} onChange={(e) => setFormData({...formData, cardNumber: e.target.value})} className="w-full p-3 border rounded" />
-                            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full p-3 border rounded" />
-                            <button onClick={handleLogin} className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600 font-semibold">Create Account</button>
-                        </div>
-                        <p className="text-center mt-4">
-                            Have an account? <button onClick={() => setIsSignUp(false)} className="text-blue-500 hover:underline">Sign In</button>
-                        </p>
-                    </div>
-                </div>
-            );
-        }
-
-        return (
-            <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-                <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-8">
-                    <h2 className="text-3xl font-bold mb-6 text-center">Sign In</h2>
-                    <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full p-3 border rounded mb-4" />
-                    <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full p-3 border rounded mb-6" />
-                    <button onClick={handleLogin} className="w-full bg-blue-500 text-white py-3 rounded-lg hover:bg-blue-600">Sign In</button>
-                    <p className="text-center mt-4 text-sm text-gray-600">Demo Accounts:</p>
-                    <p className="text-center text-xs text-gray-600">Admin: admin@rdsware.com</p>
-                    <p className="text-center text-xs text-gray-600">Restaurant: owner@mariositalian.com</p>
-                    <p className="text-center text-xs text-gray-600">Restaurant: owner@tokyosushi.com</p>
-                    <p className="text-center text-xs text-gray-600">Restaurant: owner@burgerjunction.com</p>
-                    <p className="text-center mt-4">
-                        No account? <button onClick={() => setIsSignUp(true)} className="text-blue-500 hover:underline">Sign Up</button>
-                    </p>
-                </div>
-            </div>
-        );
-    }
-
     const LandingPage = () => {
         const [addressInput, setAddressInput] = useState('');
         const landingPageContent = customPages.find(p => p.isLandingPage);
+
+        // Sanitize landing page content to prevent XSS
+        const sanitizedLandingContent = useMemo(() => {
+            return landingPageContent?.content ? sanitizeHtml(landingPageContent.content) : '';
+        }, [landingPageContent?.content]);
 
         return (
             <div className="min-h-screen bg-gradient-to-br from-red-50 to-orange-50">
@@ -756,7 +820,7 @@ const DeliveryApp = () => {
                         <div className="max-w-4xl mx-auto mb-12 bg-white rounded-xl p-8 shadow-lg">
                             <div
                                 className="prose max-w-none landing-page-content"
-                                dangerouslySetInnerHTML={{ __html: landingPageContent.content }}
+                                dangerouslySetInnerHTML={{ __html: sanitizedLandingContent }}
                             />
                         </div>
                     )}
@@ -1278,6 +1342,7 @@ const DeliveryApp = () => {
         const [giftCertCode, setGiftCertCode] = useState('');
         const [couponError, setCouponError] = useState('');
         const [giftCertError, setGiftCertError] = useState('');
+        const [validationErrors, setValidationErrors] = useState({});
 
         const applyCoupon = () => {
             const coupon = coupons.find(c => c.code === couponCode.toUpperCase() && c.isActive);
@@ -1307,6 +1372,67 @@ const DeliveryApp = () => {
             setGiftCertCode('');
         };
 
+        const validateCheckoutForm = () => {
+            const errors = {};
+
+            // Validate delivery info if delivery order
+            if (orderType === 'delivery') {
+                if (!deliveryInfo.address.trim()) {
+                    errors.address = 'Delivery address is required';
+                } else if (deliveryInfo.address.length > 200) {
+                    errors.address = 'Address is too long (max 200 characters)';
+                }
+
+                if (!isValidPhone(deliveryInfo.phone)) {
+                    errors.phone = 'Please enter a valid US phone number';
+                }
+            }
+
+            // Validate payment info
+            if (!isValidCardNumber(paymentInfo.cardNumber)) {
+                errors.cardNumber = 'Please enter a valid card number';
+            }
+
+            if (!paymentInfo.name.trim()) {
+                errors.name = 'Name on card is required';
+            } else if (paymentInfo.name.length > 100) {
+                errors.name = 'Name is too long (max 100 characters)';
+            }
+
+            return errors;
+        };
+
+        const handlePlaceOrder = () => {
+            const errors = validateCheckoutForm();
+
+            if (Object.keys(errors).length > 0) {
+                setValidationErrors(errors);
+                return;
+            }
+
+            // Sanitize inputs before placing order
+            const sanitizedDeliveryInfo = orderType === 'delivery' ? {
+                address: sanitizeInput(deliveryInfo.address),
+                phone: deliveryInfo.phone
+            } : null;
+
+            const sanitizedPaymentInfo = {
+                cardNumber: paymentInfo.cardNumber,
+                name: sanitizeInput(paymentInfo.name)
+            };
+
+            if (appliedGiftCert && giftCertApplied > 0) {
+                setGiftCertificates(giftCertificates.map(c =>
+                    c.id === appliedGiftCert.id ? {...c, balance: c.balance - giftCertApplied} : c
+                ));
+            }
+
+            placeOrder(sanitizedPaymentInfo, sanitizedDeliveryInfo);
+            setAppliedCoupon(null);
+            setAppliedGiftCert(null);
+            setValidationErrors({});
+        };
+
         const subtotal = getCartTotal();
         const deliveryFee = orderType === 'delivery' ? 2.99 : 0;
         const couponDiscount = appliedCoupon ? (subtotal * (appliedCoupon.discountPercent / 100)) : 0;
@@ -1323,8 +1449,27 @@ const DeliveryApp = () => {
                 </div>
                 {orderType === 'delivery' && (
                     <div className="mb-6">
-                        <input type="text" placeholder="Address" value={deliveryInfo.address} onChange={(e) => setDeliveryInfo({...deliveryInfo, address: e.target.value})} className="w-full p-3 border rounded mb-3" />
-                        <input type="tel" placeholder="Phone" value={deliveryInfo.phone} onChange={(e) => setDeliveryInfo({...deliveryInfo, phone: e.target.value})} className="w-full p-3 border rounded" />
+                        <div className="mb-3">
+                            <input
+                                type="text"
+                                placeholder="Address"
+                                value={deliveryInfo.address}
+                                onChange={(e) => setDeliveryInfo({...deliveryInfo, address: e.target.value})}
+                                className={`w-full p-3 border rounded ${validationErrors.address ? 'border-red-500' : ''}`}
+                                maxLength={200}
+                            />
+                            {validationErrors.address && <p className="text-red-500 text-xs mt-1">{validationErrors.address}</p>}
+                        </div>
+                        <div>
+                            <input
+                                type="tel"
+                                placeholder="Phone"
+                                value={deliveryInfo.phone}
+                                onChange={(e) => setDeliveryInfo({...deliveryInfo, phone: e.target.value})}
+                                className={`w-full p-3 border rounded ${validationErrors.phone ? 'border-red-500' : ''}`}
+                            />
+                            {validationErrors.phone && <p className="text-red-500 text-xs mt-1">{validationErrors.phone}</p>}
+                        </div>
                     </div>
                 )}
 
@@ -1387,8 +1532,27 @@ const DeliveryApp = () => {
                 </div>
 
                 <div className="mb-6">
-                    <input type="text" placeholder="Card Number" value={paymentInfo.cardNumber} onChange={(e) => setPaymentInfo({...paymentInfo, cardNumber: e.target.value})} className="w-full p-3 border rounded mb-3" />
-                    <input type="text" placeholder="Name" value={paymentInfo.name} onChange={(e) => setPaymentInfo({...paymentInfo, name: e.target.value})} className="w-full p-3 border rounded" />
+                    <div className="mb-3">
+                        <input
+                            type="text"
+                            placeholder="Card Number"
+                            value={paymentInfo.cardNumber}
+                            onChange={(e) => setPaymentInfo({...paymentInfo, cardNumber: e.target.value})}
+                            className={`w-full p-3 border rounded ${validationErrors.cardNumber ? 'border-red-500' : ''}`}
+                        />
+                        {validationErrors.cardNumber && <p className="text-red-500 text-xs mt-1">{validationErrors.cardNumber}</p>}
+                    </div>
+                    <div>
+                        <input
+                            type="text"
+                            placeholder="Name on Card"
+                            value={paymentInfo.name}
+                            onChange={(e) => setPaymentInfo({...paymentInfo, name: e.target.value})}
+                            className={`w-full p-3 border rounded ${validationErrors.name ? 'border-red-500' : ''}`}
+                            maxLength={100}
+                        />
+                        {validationErrors.name && <p className="text-red-500 text-xs mt-1">{validationErrors.name}</p>}
+                    </div>
                 </div>
                 <div className="bg-gray-50 p-4 rounded mb-6">
                     {cart.map(item => {
@@ -1451,16 +1615,7 @@ const DeliveryApp = () => {
                         </div>
                     </div>
                 </div>
-                <button onClick={() => {
-                    if (appliedGiftCert && giftCertApplied > 0) {
-                        setGiftCertificates(giftCertificates.map(c =>
-                            c.id === appliedGiftCert.id ? {...c, balance: c.balance - giftCertApplied} : c
-                        ));
-                    }
-                    placeOrder(paymentInfo, deliveryInfo);
-                    setAppliedCoupon(null);
-                    setAppliedGiftCert(null);
-                }} className="w-full bg-blue-500 text-white py-4 rounded-lg hover:bg-blue-600 font-semibold">
+                <button onClick={handlePlaceOrder} className="w-full bg-blue-500 text-white py-4 rounded-lg hover:bg-blue-600 font-semibold">
                     Place Order - ${total.toFixed(2)}
                 </button>
             </div>

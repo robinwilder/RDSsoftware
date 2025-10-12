@@ -302,6 +302,10 @@ class POSManager {
           if (!config.credentials.accessToken) errors.push('Square Access Token is required');
           if (!config.credentials.locationId) errors.push('Square Location ID is required');
           break;
+
+        default:
+          errors.push('Unknown POS provider');
+          break;
       }
     }
 

@@ -19,7 +19,8 @@ const POSOrderManager = ({ order, restaurant, posConfig }) => {
     if (order.posExternalId && posConfig?.enabled) {
       checkOrderStatus();
     }
-  }, [order.posExternalId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order.posExternalId, posConfig?.enabled]);
 
   const handleSendOrder = async () => {
     setSending(true);

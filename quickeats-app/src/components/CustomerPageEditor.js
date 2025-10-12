@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Save, Plus, Trash2, Eye, Edit, X } from 'lucide-react';
+import { Save, Plus, Trash2, Eye, Edit } from 'lucide-react';
 import WYSIWYGEditor from './WYSIWYGEditor';
 
 const CustomerPageEditor = ({ customPages, setCustomPages }) => {

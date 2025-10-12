@@ -102,8 +102,6 @@ class SquarePOSService extends BasePOSService {
             // Process each variation (Square items can have multiple variations)
             if (itemData.variations) {
               itemData.variations.forEach(variation => {
-                const variationData = variation.item_variation_data;
-
                 const transformedItem = this.transformSquareItemToInternal(
                   itemObj,
                   variation,

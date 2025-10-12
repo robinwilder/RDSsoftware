@@ -4,7 +4,7 @@
  * UI for configuring POS integration for a restaurant
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Settings, Check, X, RefreshCw, AlertCircle } from 'lucide-react';
 import posManager from '../../services/pos/POSManager';
 import { POS_PROVIDERS } from '../../types/pos';

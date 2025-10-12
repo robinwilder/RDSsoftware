@@ -5,7 +5,7 @@
  */
 
 import React, { useState } from 'react';
-import { RefreshCw, Download, Check, X, AlertCircle, Package } from 'lucide-react';
+import { RefreshCw, Download, Check, AlertCircle, Package } from 'lucide-react';
 import posManager from '../../services/pos/POSManager';
 
 const POSMenuSync = ({ restaurant, posConfig, onMenuSynced }) => {

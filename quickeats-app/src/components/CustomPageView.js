@@ -1,6 +1,12 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { sanitizeHtml } from '../utils/security';
 
 const CustomPageView = ({ page }) => {
+  // Sanitize HTML content to prevent XSS attacks
+  const sanitizedContent = useMemo(() => {
+    return page?.content ? sanitizeHtml(page.content) : '';
+  }, [page?.content]);
+
   if (!page) {
     return (
       <div className="max-w-4xl mx-auto p-6">
@@ -18,7 +24,7 @@ const CustomPageView = ({ page }) => {
         <h1 className="text-4xl font-bold mb-6">{page.title}</h1>
         <div
           className="prose max-w-none custom-page-content"
-          dangerouslySetInnerHTML={{ __html: page.content }}
+          dangerouslySetInnerHTML={{ __html: sanitizedContent }}
         />
       </article>
 
