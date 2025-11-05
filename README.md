@@ -1,4 +1,4 @@
-# RDSsoftware - QuickEats Food Delivery Platform
+# RDSsoftware - CargoDrop Food Delivery Platform
 
 A comprehensive food delivery platform built with React, featuring admin backend management, customer ordering interface, driver tracking, and a powerful WYSIWYG content editor.
 
